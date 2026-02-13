@@ -1,69 +1,72 @@
-# --- 1. Налаштування змінних ---
-$location = "northcentralus"      # Новий регіон (щоб обійти ліміти WestUS2)
+$location = "northcentralus"
 $resourceGroupName = "mate-task-11-north"
 $availabilitySetName = "myAvSet"
-$vmSize = "Standard_B2ats_v2"
+$networkSecurityGroupName = "defaultnsg"
+$virtualNetworkName = "vnet"
+$subnetName = "default"
+$sshKeyName = "linuxboxsshkey"
+
 $vmImage = "Ubuntu2204"
-$adminUser = "azureuser"
+$vmSize = "Standard_B2ats_v2"
 
 $vmName1 = "matebox-1"
 $vmName2 = "matebox-2"
+$sshKeyPublicKey = Get-Content "$HOME/.ssh/id_ed25519.pub"
 
-# --- 2. Створення інфраструктури ---
 Write-Host "Creating Resource Group..." -ForegroundColor Cyan
 New-AzResourceGroup -Name $resourceGroupName -Location $location -Force
 
 Write-Host "Creating Availability Set..." -ForegroundColor Cyan
-$avSet = New-AzAvailabilitySet -Location $location `
+New-AzAvailabilitySet -Location $location `
                       -Name $availabilitySetName `
                       -ResourceGroupName $resourceGroupName `
                       -Sku aligned `
                       -PlatformFaultDomainCount 2 `
                       -PlatformUpdateDomainCount 5
 
-Write-Host "Creating Network Resources..." -ForegroundColor Cyan
-$nsg = New-AzNetworkSecurityGroup -Name "defaultnsg" -ResourceGroupName $resourceGroupName -Location $location -SecurityRules (New-AzNetworkSecurityRuleConfig -Name SSH -Protocol Tcp -Direction Inbound -Priority 1001 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 22 -Access Allow)
-$vnet = New-AzVirtualNetwork -ResourceGroupName $resourceGroupName -Location $location -Name "vnet" -AddressPrefix "10.0.0.0/16" -Subnet (New-AzVirtualNetworkSubnetConfig -Name "default" -AddressPrefix "10.0.0.0/24" -NetworkSecurityGroup $nsg)
-
-# --- 3. Створення SSH ключа ---
-Write-Host "Setting up SSH Key..." -ForegroundColor Cyan
-$sshKeyName = "linuxboxsshkey"
-$sshPublicKeyContent = Get-Content "$HOME/.ssh/id_ed25519.pub"
-
+Write-Host "Creating SSH Key..." -ForegroundColor Cyan
 if (!(Get-AzSshKey -ResourceGroupName $resourceGroupName -Name $sshKeyName -ErrorAction SilentlyContinue)) {
-    New-AzSshKey -ResourceGroupName $resourceGroupName -Name $sshKeyName -PublicKey $sshPublicKeyContent
+    New-AzSshKey -ResourceGroupName $resourceGroupName -Name $sshKeyName -PublicKey $sshKeyPublicKey
 }
 
-# --- 4. Створення VM (Manual Config) ---
-Function Create-VM {
-    param ( $Name )
+Write-Host "Creating NSG..." -ForegroundColor Cyan
+$nsgRuleSSH = New-AzNetworkSecurityRuleConfig -Name SSH -Protocol Tcp -Direction Inbound -Priority 1001 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 22 -Access Allow
+$nsg = New-AzNetworkSecurityGroup -Name $networkSecurityGroupName -ResourceGroupName $resourceGroupName -Location $location -SecurityRules $nsgRuleSSH -Force
 
-    Write-Host "Configuring VM: $Name..." -ForegroundColor Yellow
+Write-Host "Creating VNet..." -ForegroundColor Cyan
+$subnetConfig = New-AzVirtualNetworkSubnetConfig -Name $subnetName -AddressPrefix "10.0.0.0/24" -NetworkSecurityGroup $nsg
+New-AzVirtualNetwork -ResourceGroupName $resourceGroupName -Location $location -Name $virtualNetworkName -AddressPrefix "10.0.0.0/16" -Subnet $subnetConfig -Force
 
-    # 1. NIC
-    $nic = New-AzNetworkInterface -Name "$Name-nic" -ResourceGroupName $resourceGroupName -Location $location -SubnetId $vnet.Subnets[0].Id -NetworkSecurityGroupId $nsg.Id
+$cred = Get-Credential -UserName "azureuser" -Message "Enter password (ignored by SSH)"
 
-    # 2. Config (AvSet ID)
-    $vmConfig = New-AzVMConfig -VMName $Name -VMSize $vmSize -AvailabilitySetId $avSet.Id
+Write-Host "Creating VM 1..." -ForegroundColor Yellow
+New-AzVM -ResourceGroupName $resourceGroupName `
+    -Name $vmName1 `
+    -Location $location `
+    -VirtualNetworkName $virtualNetworkName `
+    -SubnetName $subnetName `
+    -SecurityGroupName $networkSecurityGroupName `
+    -AvailabilitySetName $availabilitySetName `
+    -Image $vmImage `
+    -Size $vmSize `
+    -SshKeyName $sshKeyName `
+    -Credential $cred `
+    -PublicIpAddressName $null `
+    -OpenPorts 22
 
-    # 3. OS
-    $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Linux -ComputerName $Name -Credential (Get-Credential -UserName $adminUser -Message "Enter temp password (will be ignored by SSH check)")
+Write-Host "Creating VM 2..." -ForegroundColor Yellow
+New-AzVM -ResourceGroupName $resourceGroupName `
+    -Name $vmName2 `
+    -Location $location `
+    -VirtualNetworkName $virtualNetworkName `
+    -SubnetName $subnetName `
+    -SecurityGroupName $networkSecurityGroupName `
+    -AvailabilitySetName $availabilitySetName `
+    -Image $vmImage `
+    -Size $vmSize `
+    -SshKeyName $sshKeyName `
+    -Credential $cred `
+    -PublicIpAddressName $null `
+    -OpenPorts 22
 
-    # 4. Image
-    $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName "Canonical" -Offer "0001-com-ubuntu-server-jammy" -Skus "22_04-lts-gen2" -Version "latest"
-
-    # 5. Network
-    $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id
-
-    # 6. SSH Key (Explicit path)
-    $vmConfig = Add-AzVMSshPublicKey -VM $vmConfig -KeyData $sshPublicKeyContent -Path "/home/$adminUser/.ssh/authorized_keys"
-
-    # 7. Create
-    New-AzVM -ResourceGroupName $resourceGroupName -Location $location -VM $vmConfig
-}
-
-# Create VMs
-Create-VM -Name $vmName1
-Create-VM -Name $vmName2
-
-Write-Host "Done! VMs created with SSH keys." -ForegroundColor Green
+Write-Host "Done!" -ForegroundColor Green
