@@ -7,7 +7,7 @@ $subnetName = "default"
 $sshKeyName = "linuxboxsshkey"
 
 $vmImage = "Ubuntu2204"
-$vmSize = "Standard_B2ats_v2"
+$vmSize = "Standard_B1s"
 
 $vmName1 = "matebox-1"
 $vmName2 = "matebox-2"
